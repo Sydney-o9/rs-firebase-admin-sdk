@@ -109,6 +109,25 @@ async fn test_create_user() {
 
 #[tokio::test]
 #[serial]
+async fn test_create_user_with_display_name() {
+    let auth = get_auth_service();
+
+    let mut new_user = NewUser::email_and_password("test@example.com".into(), "123ABC".into());
+    new_user.display_name = Some("Alice".into());
+
+    let user = auth.create_user(new_user).await.unwrap();
+
+    assert_eq!(
+        user.display_name,
+        Some(String::from("Alice")),
+        "Creating new user yielded unexpected display_name"
+    );
+
+    auth.clear_all_users().await.unwrap();
+}
+
+#[tokio::test]
+#[serial]
 async fn test_get_users() {
     let auth = get_auth_service();
 
