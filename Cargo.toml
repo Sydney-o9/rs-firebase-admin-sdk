@@ -7,5 +7,6 @@ members = [
     "examples/verify_token",
     "examples/clear_emulator",
     "examples/cookies",
-    "examples/explicit_project_id"
+    "examples/explicit_project_id",
+    "examples/custom_token"
 ]
