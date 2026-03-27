@@ -109,6 +109,25 @@ async fn test_create_user() {
 
 #[tokio::test]
 #[serial]
+async fn test_create_user_with_display_name() {
+    let auth = get_auth_service();
+
+    let mut new_user = NewUser::email_and_password("test@example.com".into(), "123ABC".into());
+    new_user.display_name = Some("Alice".into());
+
+    let user = auth.create_user(new_user).await.unwrap();
+
+    assert_eq!(
+        user.display_name,
+        Some(String::from("Alice")),
+        "Creating new user yielded unexpected display_name"
+    );
+
+    auth.clear_all_users().await.unwrap();
+}
+
+#[tokio::test]
+#[serial]
 async fn test_get_users() {
     let auth = get_auth_service();
 
@@ -534,11 +553,12 @@ async fn test_generate_email_action_link() {
 
 #[tokio::test]
 async fn test_create_custom_token_without_signer_returns_error() {
-    let auth = get_auth_service();
+    // Live auth (not emulated) with no signer configured — must fail.
+    let auth = FirebaseAuth::live("test-project", MockIamClient::new());
     let result = auth.create_custom_token("some-uid").await;
     assert!(
         result.is_err(),
-        "Expected MissingServiceAccount error when no signer is configured"
+        "Expected an error when no signer is configured on a live instance"
     );
     let err = result.unwrap_err();
     assert!(
@@ -603,12 +623,8 @@ async fn test_create_custom_token_blacklisted_claim_is_rejected() {
 async fn test_create_custom_token_uid_exactly_128_ascii_chars_passes_validation() {
     let auth = get_auth_service();
     let uid = "a".repeat(128);
-    let err = auth.create_custom_token(&uid).await.unwrap_err();
-    // Validation passed — error is MissingServiceAccount, not InvalidArgument
-    assert!(
-        !matches!(err.current_context(), CustomTokenError::InvalidArgument(_)),
-        "128-char uid should pass validation"
-    );
+    // Validation passes — emulated auth produces a token.
+    auth.create_custom_token(&uid).await.unwrap();
 }
 
 #[tokio::test]
@@ -616,11 +632,8 @@ async fn test_create_custom_token_uid_128_unicode_chars_passes_validation() {
     let auth = get_auth_service();
     // Each '😀' is 4 bytes; 128 chars = 512 bytes — must pass char-count check
     let uid = "😀".repeat(128);
-    let err = auth.create_custom_token(&uid).await.unwrap_err();
-    assert!(
-        !matches!(err.current_context(), CustomTokenError::InvalidArgument(_)),
-        "128 unicode chars should pass validation regardless of byte length"
-    );
+    // Validation passes — emulated auth produces a token.
+    auth.create_custom_token(&uid).await.unwrap();
 }
 
 #[tokio::test]
@@ -672,28 +685,20 @@ async fn test_create_custom_token_all_14_blacklisted_claims_are_rejected() {
 async fn test_create_custom_token_valid_claims_pass_validation() {
     let auth = get_auth_service();
     let claims = serde_json::json!({ "role": "admin", "premium": true });
-    let err = auth
-        .create_custom_token_with_claims("uid", claims)
+    // Validation passes — emulated auth produces a token.
+    auth.create_custom_token_with_claims("uid", claims)
         .await
-        .unwrap_err();
-    assert!(
-        !matches!(err.current_context(), CustomTokenError::InvalidArgument(_)),
-        "non-blacklisted claims should pass validation"
-    );
+        .unwrap();
 }
 
 #[tokio::test]
 async fn test_create_custom_token_empty_claims_object_passes_validation() {
     let auth = get_auth_service();
     let claims = serde_json::json!({});
-    let err = auth
-        .create_custom_token_with_claims("uid", claims)
+    // Validation passes — emulated auth produces a token.
+    auth.create_custom_token_with_claims("uid", claims)
         .await
-        .unwrap_err();
-    assert!(
-        !matches!(err.current_context(), CustomTokenError::InvalidArgument(_)),
-        "empty claims object should pass validation"
-    );
+        .unwrap();
 }
 
 #[tokio::test]
@@ -959,4 +964,62 @@ async fn test_create_session_cookie() {
     assert_eq!(email, "test@example.com");
 
     auth.clear_all_users().await.unwrap();
+}
+
+// emulated custom token (unsigned JWT)
+
+#[tokio::test]
+async fn test_emulated_create_custom_token_returns_unsigned_jwt() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let auth = get_auth_service();
+    let token = auth.create_custom_token("test-uid").await.unwrap();
+
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have 3 dot-separated parts");
+    assert_eq!(parts[2], "", "signature segment must be empty for alg=none");
+
+    let header: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+    assert_eq!(header["alg"], "none");
+    assert_eq!(header["typ"], "JWT");
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(payload["uid"], "test-uid");
+    assert_eq!(payload["iss"], "firebase-auth-emulator@example.com");
+    assert_eq!(payload["sub"], "firebase-auth-emulator@example.com");
+    assert_eq!(
+        payload["aud"],
+        "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit"
+    );
+    assert!(payload["iat"].is_number());
+    assert!(payload["exp"].is_number());
+    assert_eq!(
+        payload["exp"].as_u64().unwrap() - payload["iat"].as_u64().unwrap(),
+        3600
+    );
+    assert!(
+        payload.get("claims").is_none(),
+        "claims must be absent when not provided"
+    );
+}
+
+#[tokio::test]
+async fn test_emulated_create_custom_token_with_claims() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let auth = get_auth_service();
+    let claims = serde_json::json!({ "role": "admin", "tier": 2 });
+    let token = auth
+        .create_custom_token_with_claims("uid2", claims)
+        .await
+        .unwrap();
+
+    let parts: Vec<&str> = token.split('.').collect();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(payload["uid"], "uid2");
+    assert_eq!(payload["claims"]["role"], "admin");
+    assert_eq!(payload["claims"]["tier"], 2);
 }
