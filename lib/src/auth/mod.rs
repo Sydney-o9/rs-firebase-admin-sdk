@@ -147,7 +147,6 @@ async fn discover_service_account_email() -> Result<String, Report<CustomTokenEr
 
 async fn sign_custom_token<C: ApiHttpClient>(
     client: &C,
-    project_id: &str,
     service_account_email: &str,
     uid: &str,
     claims: Option<serde_json::Value>,
@@ -172,7 +171,7 @@ async fn sign_custom_token<C: ApiHttpClient>(
 
     let encoded_email = urlencoding::encode(service_account_email);
     let iam_url = format!(
-        "https://iamcredentials.googleapis.com/v1/projects/{project_id}/serviceAccounts/{encoded_email}:signJwt"
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{encoded_email}:signJwt"
     );
 
     let response: SignJwtResponse = client
@@ -534,10 +533,6 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
     fn get_client(&self) -> &C;
     fn get_auth_uri_builder(&self) -> &ApiUriBuilder;
 
-    fn get_project_id(&self) -> &str {
-        "-"
-    }
-
     /// Returns `true` when this instance targets the Firebase Auth Emulator.
     fn is_emulated(&self) -> bool {
         false
@@ -574,7 +569,7 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
                 return sign_custom_token_emulated(&uid, None);
             }
             let sa_email = self.resolve_signing_service_account().await?;
-            sign_custom_token(self.get_client(), self.get_project_id(), &sa_email, &uid, None).await
+            sign_custom_token(self.get_client(), &sa_email, &uid, None).await
         }
     }
 
@@ -599,7 +594,7 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
                 return sign_custom_token_emulated(&uid, Some(claims));
             }
             let sa_email = self.resolve_signing_service_account().await?;
-            sign_custom_token(self.get_client(), self.get_project_id(), &sa_email, &uid, Some(claims)).await
+            sign_custom_token(self.get_client(), &sa_email, &uid, Some(claims)).await
         }
     }
 
@@ -1022,7 +1017,6 @@ where
 
 pub struct FirebaseAuth<ApiHttpClientT> {
     client: ApiHttpClientT,
-    project_id: String,
     auth_uri_builder: ApiUriBuilder,
     emulator_auth_uri_builder: Option<ApiUriBuilder>,
     /// Explicit service account email provided via `live_with_signer()`.
@@ -1044,7 +1038,7 @@ where
 
         Self {
             client,
-            project_id: project_id.to_string(),
+
             auth_uri_builder: ApiUriBuilder::new(fb_auth_root),
             emulator_auth_uri_builder: Some(ApiUriBuilder::new(fb_emu_root)),
             signing_service_account: None,
@@ -1060,7 +1054,7 @@ where
 
         Self {
             client,
-            project_id: project_id.to_string(),
+
             auth_uri_builder: ApiUriBuilder::new(fb_auth_root),
             emulator_auth_uri_builder: None,
             signing_service_account: None,
@@ -1083,7 +1077,7 @@ where
 
         Self {
             client,
-            project_id: project_id.to_string(),
+
             auth_uri_builder: ApiUriBuilder::new(fb_auth_root),
             emulator_auth_uri_builder: None,
             signing_service_account: Some(service_account_email.to_string()),
@@ -1102,10 +1096,6 @@ where
 
     fn get_auth_uri_builder(&self) -> &ApiUriBuilder {
         &self.auth_uri_builder
-    }
-
-    fn get_project_id(&self) -> &str {
-        &self.project_id
     }
 
     fn is_emulated(&self) -> bool {
