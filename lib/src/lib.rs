@@ -52,6 +52,24 @@ impl App<EmulatorCredentials> {
 }
 
 impl App<AccessTokenCredentials> {
+    /// Create instance of Firebase app for live project with an explicit project ID,
+    /// bypassing environment variable and credential header resolution.
+    pub async fn live_with_project_id(
+        project_id: &str,
+    ) -> Result<Self, Report<GCPCredentialsError>> {
+        let credentials: Credentials = Builder::default()
+            .with_scopes(FIREBASE_AUTH_SCOPES)
+            .build_access_token_credentials()
+            .change_context(GCPCredentialsError)?
+            .into();
+
+        Ok(Self {
+            credentials,
+            project_id: project_id.to_string(),
+            _credentials_provider: PhantomData,
+        })
+    }
+
     /// Create instance of Firebase app for live project
     pub async fn live() -> Result<Self, Report<GCPCredentialsError>> {
         let credentials: Credentials = Builder::default()
@@ -78,25 +96,32 @@ impl App<AccessTokenCredentials> {
         FirebaseAuth::live(&self.project_id, client)
     }
 
+    /// Create Firebase authentication manager with custom token signing support.
+    ///
+    /// `service_account_email` is passed to the IAM Credentials API to sign custom tokens.
+    /// The service account must have the `iam.serviceAccounts.signJwt` permission
+    /// (granted by `roles/iam.serviceAccountTokenCreator`).
+    pub fn auth_with_signer(&self, service_account_email: &str) -> FirebaseAuth<ReqwestApiClient> {
+        let client = ReqwestApiClient::new(reqwest::Client::new(), self.credentials.clone());
+
+        FirebaseAuth::live_with_signer(&self.project_id, service_account_email, client)
+    }
+
     /// Create OIDC token verifier
     #[cfg(feature = "tokens")]
     pub async fn id_token_verifier(
         &self,
     ) -> Result<impl jwt::TokenValidator, Report<credentials::GCPCredentialsError>> {
-        let project_id = credentials::get_project_id(&self.credentials).await?;
-
-        jwt::LiveValidator::new_jwt_validator(project_id)
+        jwt::LiveValidator::new_jwt_validator(self.project_id.clone())
             .change_context(credentials::GCPCredentialsError)
     }
 
-    // /// Create cookie token verifier
+    /// Create cookie token verifier
     #[cfg(feature = "tokens")]
     pub async fn cookie_token_verifier(
         &self,
     ) -> Result<impl jwt::TokenValidator, Report<credentials::GCPCredentialsError>> {
-        let project_id = credentials::get_project_id(&self.credentials).await?;
-
-        jwt::LiveValidator::new_cookie_validator(project_id)
+        jwt::LiveValidator::new_cookie_validator(self.project_id.clone())
             .change_context(credentials::GCPCredentialsError)
     }
 }
