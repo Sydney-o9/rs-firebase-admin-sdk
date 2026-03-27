@@ -11,6 +11,7 @@ use crate::api_uri::{ApiUriBuilder, FirebaseAuthEmulatorRestApi, FirebaseAuthRes
 use crate::client::ApiHttpClient;
 use crate::client::error::ApiClientError;
 use crate::util::{I128EpochMs, StrEpochMs, StrEpochSec};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 pub use claims::Claims;
 use error_stack::{Report, ResultExt};
 use http::Method;
@@ -26,6 +27,7 @@ use time::{Duration, OffsetDateTime};
 const FIREBASE_AUTH_REST_AUTHORITY: &str = "identitytoolkit.googleapis.com";
 const CUSTOM_TOKEN_AUDIENCE: &str =
     "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit";
+const EMULATOR_SIGNING_ACCOUNT: &str = "firebase-auth-emulator@example.com";
 
 /// Error returned by [`FirebaseAuthService::create_custom_token`] and
 /// [`FirebaseAuthService::create_custom_token_with_claims`].
@@ -186,6 +188,36 @@ async fn sign_custom_token<C: ApiHttpClient>(
     Ok(response.signed_jwt)
 }
 
+/// Build an unsigned JWT (alg: "none", empty signature) for use with the Firebase Auth
+/// Emulator. The emulator accepts these tokens for `signInWithCustomToken` without
+/// verifying the signature, which means no IAM call or RSA key is needed in tests.
+fn sign_custom_token_emulated(
+    uid: &str,
+    claims: Option<serde_json::Value>,
+) -> Result<String, Report<CustomTokenError>> {
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .change_context(CustomTokenError::SigningFailed)?
+        .as_secs();
+
+    let payload = CustomTokenPayload {
+        iss: EMULATOR_SIGNING_ACCOUNT,
+        sub: EMULATOR_SIGNING_ACCOUNT,
+        aud: CUSTOM_TOKEN_AUDIENCE,
+        iat: now,
+        exp: now + 3600,
+        uid,
+        claims,
+    };
+    let payload_json =
+        serde_json::to_string(&payload).change_context(CustomTokenError::SigningFailed)?;
+    let encoded_payload = URL_SAFE_NO_PAD.encode(payload_json);
+
+    Ok(format!("{header}.{encoded_payload}."))
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NewUser {
@@ -196,6 +228,8 @@ pub struct NewUser {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl NewUser {
@@ -204,6 +238,7 @@ impl NewUser {
             uid: None,
             email: Some(email),
             password: Some(password),
+            display_name: None,
         }
     }
 }
@@ -498,6 +533,11 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
     fn get_client(&self) -> &C;
     fn get_auth_uri_builder(&self) -> &ApiUriBuilder;
 
+    /// Returns `true` when this instance targets the Firebase Auth Emulator.
+    fn is_emulated(&self) -> bool {
+        false
+    }
+
     /// Resolve the service account email to use for custom token signing.
     ///
     /// The default implementation always returns [`CustomTokenError::MissingServiceAccount`].
@@ -522,8 +562,12 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
         uid: &str,
     ) -> impl Future<Output = Result<String, Report<CustomTokenError>>> + Send {
         let uid = uid.to_string();
+        let is_emulated = self.is_emulated();
         async move {
             validate_custom_token_args(&uid, None)?;
+            if is_emulated {
+                return sign_custom_token_emulated(&uid, None);
+            }
             let sa_email = self.resolve_signing_service_account().await?;
             sign_custom_token(self.get_client(), &sa_email, &uid, None).await
         }
@@ -543,8 +587,12 @@ pub trait FirebaseAuthService<C: ApiHttpClient>: Send + Sync + 'static {
         claims: serde_json::Value,
     ) -> impl Future<Output = Result<String, Report<CustomTokenError>>> + Send {
         let uid = uid.to_string();
+        let is_emulated = self.is_emulated();
         async move {
             validate_custom_token_args(&uid, Some(&claims))?;
+            if is_emulated {
+                return sign_custom_token_emulated(&uid, Some(claims));
+            }
             let sa_email = self.resolve_signing_service_account().await?;
             sign_custom_token(self.get_client(), &sa_email, &uid, Some(claims)).await
         }
@@ -1045,6 +1093,10 @@ where
 
     fn get_auth_uri_builder(&self) -> &ApiUriBuilder {
         &self.auth_uri_builder
+    }
+
+    fn is_emulated(&self) -> bool {
+        self.emulator_auth_uri_builder.is_some()
     }
 
     async fn resolve_signing_service_account(&self) -> Result<String, Report<CustomTokenError>> {
